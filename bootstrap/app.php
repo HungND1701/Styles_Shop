@@ -3,6 +3,9 @@
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use \App\Http\Middleware\ForceJsonResponse;
+use \App\Http\Middleware\Cors;
+
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -15,8 +18,19 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->web(append: [
             \App\Http\Middleware\HandleInertiaRequests::class,
             \Illuminate\Http\Middleware\AddLinkHeadersForPreloadedAssets::class,
+            ForceJsonResponse::class,
+            Cors::class,
         ]);
-
+        // $middleware->api(append: [
+        //     ForceJsonResponse::class,
+        //     Cors::class,
+        // ]);
+        $middleware->alias([
+            'json.response' => \App\Http\Middleware\ForceJsonResponse::class,
+            'cors' => \App\Http\Middleware\Cors::class,
+            'api.admin' => \App\Http\Middleware\AdminAuth::class,
+            'api.superAdmin' => \App\Http\Middleware\SuperAdminAuth::class, 
+        ]);
         //
     })
     ->withExceptions(function (Exceptions $exceptions) {

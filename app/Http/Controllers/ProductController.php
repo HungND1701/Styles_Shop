@@ -8,14 +8,18 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
-use App\Models\Category;
 use App\Models\Color;
 use App\Models\ColorProduct;
 use App\Models\ImageColorProduct;
 use App\Models\SizeColorProduct;
 use App\Http\Controllers\UploadController;
+use App\Models\Order;
+use App\Models\Size;
+use App\Models\Tag;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
 use Google\Cloud\Storage\StorageClient;
+use Illuminate\Support\Str;
 
 class ProductController extends Controller
 {
@@ -49,6 +53,75 @@ class ProductController extends Controller
             $products = Product::all(['id', 'name']);
 
             return response()->json($products);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Unable to retrieve products'], 500);
+        }
+    }
+    public function searchByName(Request $request)
+    {
+        try {
+            $validator = Validator::make($request->all(), [
+                'findName' => 'required|string|max:255',
+            ]);
+
+            if ($validator->fails()) {
+                return response()->json(['errors' => $validator->errors()], 400);
+            }
+
+            $findName = $request->input('findName');
+            // Chuyển findName về dạng viết thường và không dấu
+            $normalizedFindName = Str::slug($findName, ' ');
+
+            // Tách findName thành các từ
+            $findWords = explode(' ', $normalizedFindName);
+
+            $products = Product::all(['id', 'name', 'price', 'tag_id', 'sale'])->filter(function ($product) use ($findWords) {
+                // Chuyển tên sản phẩm về dạng viết thường và không dấu
+                $normalizedProductName = Str::slug($product->name, ' ');
+
+                // Tách tên sản phẩm thành các từ
+                $productWords = explode(' ', $normalizedProductName);
+
+                // Kiểm tra xem tên sản phẩm có chứa tất cả các từ con trong findName hay không
+                foreach ($findWords as $word) {
+                    $found = false;
+                    foreach ($productWords as $pword) {
+                        if (strpos($pword, $word) === 0) {
+                            $found = true;
+                            break;
+                        }
+                    }
+                    if (!$found) {
+                        return false;
+                    }
+                }
+                return true;
+            })->map(function ($product) use ($findWords) {
+                $normalizedProductName = Str::slug($product->name, ' ');
+                $productWords = explode(' ', $normalizedProductName);
+
+                // Tính điểm trùng khớp
+                $score = 0;
+                foreach ($findWords as $word) {
+                    foreach ($productWords as $pword) {
+                        if (strpos($pword, $word) === 0) {
+                            $score++;
+                        }
+                    }
+                }
+
+                // Gắn điểm trùng khớp vào sản phẩm
+                $product->match_score = $score;
+                $product->tag = Tag::find($product->tag_id)->name;
+                $colorProductId = ColorProduct::where('product_id',$product->id)->first()->id;
+                $product->imageUrl = ImageColorProduct::where('color_product_id', $colorProductId)->first()->url;
+                return $product;
+            });
+
+            // Sắp xếp sản phẩm theo điểm trùng khớp từ cao đến thấp
+            $sortedProducts = $products->sortByDesc('match_score')->values();
+
+            return response()->json($sortedProducts);
         } catch (\Exception $e) {
             return response()->json(['error' => 'Unable to retrieve products'], 500);
         }
@@ -174,11 +247,29 @@ class ProductController extends Controller
     public function getProduct($id)
     {
         try {
-            $product = Product::with(['categories', 'tag','type','colorProduct.color', 'colorProduct.sizes.size', 'colorProduct.images'])->findOrFail($id);
+            $product = Product::with(['reviews.images','reviews.user','reviews.order','categories', 'tag','type','colorProduct.color', 'colorProduct.sizes.size', 'colorProduct.images'])->findOrFail($id);
             $categoryIds = $product->categories->pluck('id')->toArray();
+            $product->reviews->map(function($review){
+                $formattedDate = Carbon::parse($review->created_at)->format('d-m-Y');
+                $review->formatted_created_at = $formattedDate;
+
+                $product_id = $review->product_id;
+                $order_id = $review->order_id;
+                $order = Order::select(['id', 'created_at'])->with(['products' => function ($query) use ($product_id) {
+                    $query->where('products.id', $product_id);
+                }])->findOrFail($order_id);
+
+                $product = $order->products[0];
+                $colorName = Color::findOrFail($product->pivot->color_id)->name;
+                $sizeName = Size::findOrFail($product->pivot->size_id)->name;
+                if($order){
+                    $review->color = $colorName;
+                    $review->size = $sizeName;
+                }
+            });
 
         // Tìm các sản phẩm khác thuộc cùng các categories đó, ngoại trừ sản phẩm hiện tại
-            $productSuggest = Product::with(['categories', 'tag', 'type', 'colorProduct.color', 'colorProduct.sizes.size', 'colorProduct.images'])
+            $productSuggest = Product::with(['reviews','categories', 'tag', 'type', 'colorProduct.color', 'colorProduct.sizes.size', 'colorProduct.images'])
                 ->whereHas('categories', function ($query) use ($categoryIds) {
                     $query->whereIn('categories.id', $categoryIds);
                 })
@@ -331,7 +422,10 @@ class ProductController extends Controller
             'sizes.*.id' => 'required|integer',
             'sizes.*.quantity' => 'required|integer',
         ]);
-        
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 400);
+        }
+
         try {
             DB::transaction(function () use ($request, $productId) {
                 $product = Product::findOrFail($productId);
@@ -373,20 +467,51 @@ class ProductController extends Controller
         }
         return response()->json(['success' => true]);
     }
+    public function updateColorInfo(Request $request, $colorProductId)
+    {
+        $validator = Validator::make($request->all(), [
+            'id' => 'required|integer',
+            'code' => 'required|string|max:9',
+        ]);
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 400);
+        }
+        try {
+            DB::table('colors_products')->where('id',$colorProductId)->update([
+                'color_id' => $request['id'],
+            ]);
+        } catch (\Exception $e) {
+            // Xử lý các lỗi khác
+            return response()->json(['error' => 'Failed to add Product', 'message' => $e->getMessage()], 500);
+        }
+        return response()->json(['success' => true]);
+    }
     public function updateSizesProduct(Request $request, $colorProductId){
         $validator = Validator::make($request->all(), [
             'sizes' => 'required|array',
             'sizes.*.id' => 'required|integer',
             'sizes.*.quantity' => 'required|integer',
         ]);
-        SizeColorProduct::where('color_product_id', $colorProductId)->delete();
-        foreach ($request->sizes as $size){
-            SizeColorProduct::create([
-                'color_product_id' => $colorProductId,
-                'size_id' => $size['id'],
-                'quantity' => $size['quantity'],
-            ]);
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 400);
         }
+        try{
+            DB::transaction(function () use ($request, $colorProductId) {
+                SizeColorProduct::where('color_product_id', $colorProductId)->delete();
+                foreach ($request->sizes as $size){
+                    SizeColorProduct::create([
+                        'color_product_id' => $colorProductId,
+                        'size_id' => $size['id'],
+                        'quantity' => $size['quantity'],
+                    ]);
+                }
+            },5);
+        }catch (\Exception $e) {
+            Log::error($e);
+            // Xử lý các lỗi khác
+            return response()->json(['error' => 'Failed to update', 'message' => $e->getMessage()], 500);
+        }
+        return response()->json(['success' => true], 200);
     }
 
     /**
@@ -397,7 +522,6 @@ class ProductController extends Controller
         try {
             $product = Product::findOrFail($id);
             $product->delete();
-
             return response()->json(null, 204);
         } catch (ModelNotFoundException $e) {
             return response()->json(['error' => 'Product not found'], 404);

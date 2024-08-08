@@ -61,6 +61,19 @@ class CategoryController extends Controller
             ], Response::HTTP_BAD_REQUEST);
         }
     }
+    public function getCategoryWithProduct($id)
+    {
+        try {
+            $category = Category::with('products.type','products.tag', 'products.colorProduct.color', 'products.colorProduct.sizes.size', 'products.colorProduct.images','products.reviews')->find($id);
+
+            return response()->json($category, Response::HTTP_OK);
+        } catch (Exception $e) {
+            return response()->json([
+                'error' => 'Could not fetch category',
+                'message' => $e->getMessage()
+            ], Response::HTTP_INTERNAL_SERVER_ERROR);
+        }
+    }
 
     public function getCategory($id)
     {

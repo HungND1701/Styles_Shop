@@ -36,7 +36,7 @@ class CategoryHomepageController extends Controller
     public function getCategoriesWithProduct()
     {
         try {
-            $categories = CategoryHomepage::with('category.products.tag', 'category.products.colorProduct.color', 'category.products.colorProduct.sizes.size', 'category.products.colorProduct.images')->orderBy('stt', 'asc')->get();
+            $categories = CategoryHomepage::with('category.products.tag', 'category.products.colorProduct.color', 'category.products.colorProduct.sizes.size', 'category.products.colorProduct.images','category.products.reviews')->orderBy('stt', 'asc')->get();
 
             // Chuyển đổi các categoryHomepage thành mảng để thêm thuộc tính tạm thời vào JSON
             $categoriesArray = $categories->toArray();
@@ -88,10 +88,8 @@ class CategoryHomepageController extends Controller
     {
         try {
             $validatedData = $request->validate([
-                'category_id' => 'required|integer',
                 'stt' => 'required|integer'
             ]);
-
             $category = CategoryHomepage::findOrFail($id);
             $category->update($validatedData);
             return response()->json($category, Response::HTTP_OK);

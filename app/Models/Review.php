@@ -19,7 +19,7 @@ class Review extends Model
 
     public function user()
     {
-        return $this->belongsTo(User::class);
+        return $this->belongsTo(User::class)->select(['id', 'name']);
     }
 
     public function product()
@@ -36,4 +36,9 @@ class Review extends Model
     {
         return $this->hasMany(ImageReview::class);
     }
+    public function replies()
+    {
+        return $this->hasMany(Reply::class);
+    }
+
 }

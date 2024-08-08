@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
+use App\Models\Category;
 use App\Models\ColorProduct;
 use App\Models\Order;
 use Illuminate\Support\Facades\Validator;
@@ -12,16 +13,24 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 use App\Models\Color;
+use App\Models\Product;
 use App\Models\Review;
 use App\Models\Size;
-
+use App\Models\SizeColorProduct;
+use App\Models\Status;
 
 class OrderController extends Controller
 {
     public function index()
     {
         try {
-            $orders = Order::with('products')->get();
+            $orders = Order::with(['user','products', 'statuses', 'paymentMethod'])->get()
+            ->map(function($order){
+                $time = Carbon::parse($order->created_at)->format('H:i:s d-m-Y');
+                $order->time = $time;
+                return $order;
+            })->sortByDesc('created_at')->values();
+            Log::error($orders);
             return response()->json($orders);
         } catch (\Exception $e) {
             return response()->json(['error' => 'Unable to retrieve orders'], 500);
@@ -220,18 +229,161 @@ class OrderController extends Controller
             return response()->json(['error' => 'Unable to update order'], 500);
         }
     }
+    public function comfirm(Request $request)
+    {
+        try {
+            $validator = Validator::make($request->all(), [
+                'listOrder' => 'required|array',
+            ]);
+            if ($validator->fails()) {
+                return response()->json(['errors' => $validator->errors()], 400);
+            }
+            DB::transaction(
+                function () use ($request){
+                    foreach ($request->listOrder as $orderId) {
+                        $order = Order::with(['statuses'])->findOrFail($orderId);
+                        if ($order->statuses[0]->id == 1) {
+                            // Add new status to the pivot table
+                            $order->statuses()->attach(2); // Assuming 2 is the ID for the new status
+                        }
+                    }
+                }
+                ,5
+            );    
+            return response()->json(['message' => 'Orders confirmed successfully.']);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['error' => 'Order not found'], 404);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'An error occurred while confirming orders.'], 500);
+        }
+    }
+    public function nextStatus($id)
+    {
+        try {
+            $order = Order::with(['statuses', 'products'])->findOrFail($id);
+            if ($order->statuses[0]->id >= 2 && $order->statuses[0]->id <= 4 ) {
+                $order->statuses()->attach($order->statuses[0]->id + 1); 
+                $orderNew = Order::with(['statuses'])->findOrFail($id);
+                return response()->json($orderNew);
+            }else if ($order->statuses[0]->id == 5 ) {
+                foreach($order->products as $product){
+                    $quantityOrder = $product->pivot->quantity;
+                    $color_id = $product->pivot->color_id;
+                    $size_id = $product->pivot->size_id;
+                    $colorProductId = ColorProduct::where('color_id',$color_id)->where('product_id', $product->id)->first()->id;
+                    $size = SizeColorProduct::where('size_id', $size_id)->where('color_product_id', $colorProductId)->first();
+                    $quantitySize = $size->quantity;
+                    if($quantitySize < $quantityOrder) return response()->json(['error' => 'Tồn kho không đủ'], 500);
+                    else{
+                        $newQuantity = $quantitySize -  $quantityOrder;
+                        $size->update([
+                            'quantity' => $newQuantity
+                        ]);
+                    }
+                }
+                $order->statuses()->attach(7); 
+                $orderNew = Order::with(['statuses'])->findOrFail($id);
+                return response()->json($orderNew);
+            }
+                       
+            return response()->json(['message' => 'Orders confirmed successfully.']);
+        } catch (ModelNotFoundException $e) {
+            Log::error($e);
+            return response()->json(['error' => 'Order not found'], 404);
+        } catch (\Exception $e) {
+            Log::error($e);
+            return response()->json(['error' => 'An error occurred while confirming orders.'], 500);
+        }
+    }
+    public function cancelOrder(Request $request, $id){
+        try {
+            $order = Order::with(['statuses'])->findOrFail($id);
+            if ($order->statuses[0]->id == 1 && $request->user()->id == $order->user_id ) {
+                $order->statuses()->attach(6); 
+                $orderNew = Order::with(['statuses'])->findOrFail($id);
+                return response()->json($orderNew);
+            }
+            return response()->json(['error' => 'eror'], 500);
+        } catch (ModelNotFoundException $e) {
+            Log::error($e);
+            return response()->json(['error' => 'Order not found'], 404);
+        } catch (\Exception $e) {
+            Log::error($e);
+            return response()->json(['error' => 'An error occurred while confirming orders.'], 500);
+        }
+    } 
 
     public function destroy($id)
     {
         try {
             $order = Order::findOrFail($id);
             $order->delete();
-
             return response()->json(null, 204);
         } catch (ModelNotFoundException $e) {
             return response()->json(['error' => 'Order not found'], 404);
         } catch (\Exception $e) {
             return response()->json(['error' => 'Unable to delete order'], 500);
+        }
+    }
+    public function overview()
+    {
+        try {
+            $orders = Order::with(['products', 'statuses'])->get();
+            $total_order = Count($orders);
+            $order_done = $orders->filter(function ($order) {
+                return $order->statuses[0]->id == 7;
+            });
+            $total_order_done = Count($order_done);
+            $revenue = 0;
+            foreach($order_done as $order){
+                $revenue += $order->total_price;
+            }
+
+            $totalQuantity = 0; // Khởi tạo biến tổng số lượng
+            $products = Product::with(['colorProduct.sizes'])->get()
+                ->map(function ($product) {
+                    $product->total_quantity_sold = $product->orders()->sum('order_product.quantity');
+                    return $product;
+                })->sortByDesc('total_quantity_sold')->values();
+            foreach($products as $product) {
+                foreach ($product->colorProduct as $colorProduct) {
+                    $totalQuantity += $colorProduct->sizes->sum('quantity'); // Tính tổng số lượng từ mỗi màu
+                }
+            };
+            $categories = Category::with(['products'])->get()
+            ->map(function ($category) {
+                $total_quantity_sold = 0;
+                foreach($category->products as $product){
+                    $total_quantity_sold += $product->orders()->sum('order_product.quantity');
+                }
+                $category->total_quantity_sold = $total_quantity_sold;
+                $return = [
+                    'id' => $category->id,
+                    'name' => $category->name,
+                    'product_count' => $category->product_count,
+                    'total_quantity_sold'=>$total_quantity_sold,
+                ];
+                return $return;
+            })->sortByDesc('total_quantity_sold')->values();
+            $product_best_sale = $products->take(5)->map(function($product){
+                return [
+                    'id' => $product->id,
+                    'name' => $product->name,
+                    'price' => $product->price,
+                    'total_sale' => $product->total_quantity_sold,
+                ];
+            });
+            $response = [
+                'total_order'=>  $total_order,
+                'total_order_done' =>$total_order_done,
+                'revenue' => $revenue,
+                'total_quantity_product' => $totalQuantity,
+                'product_best_sale' => $product_best_sale,
+                'category_best_sale'=> $categories->take(5),
+            ];
+            return response()->json($response);
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Unable to retrieve orders'], 500);
         }
     }
 }

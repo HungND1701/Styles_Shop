@@ -10,6 +10,7 @@ class SizeColorProduct extends Model
     use HasFactory;
 
     protected $table = 'sizes_products';
+    protected $fillable = ['color_product_id','size_id', 'quantity'];
 
     public function colorProduct()
     {

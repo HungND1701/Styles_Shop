@@ -55,8 +55,25 @@ class ReviewController extends Controller
     public function show($id)
     {
         try {
-            $review = Review::with(['images'])->findOrFail($id);
+            $review = Review::with(['images', 'replies'])->findOrFail($id);
             return response()->json(['review' => $review], 200);
+        } catch (Exception $e) {
+            return response()->json(['error' => 'Review not found', 'message' => $e->getMessage()], 404);
+        }
+    }
+    public function getAll()
+    {
+        try {
+            $review = Review::with(['user','images','replies'])->get()
+            ->map(function($review){
+                $time = Carbon::parse($review->created_at)->format('H:i:s d-m-Y');
+                $review->time = $time;
+                if(count($review->replies) == 0) $review->status = 'Chưa phản hồi';
+                else $review->status = 'Đã phản hồi';
+                return $review;
+            })
+            ->sortByDesc('created_at')->values();
+            return response()->json($review, 200);
         } catch (Exception $e) {
             return response()->json(['error' => 'Review not found', 'message' => $e->getMessage()], 404);
         }
@@ -66,7 +83,7 @@ class ReviewController extends Controller
     {
         try {
             $userId = $request->user()->id;
-            $reviews = Review::with(['images'])->where('user_id',$userId)->get()
+            $reviews = Review::with(['images','replies'])->where('user_id',$userId)->get()
             ->map(function($review) {
                 $formattedDate = Carbon::parse($review->created_at)->format('H:i d-m-Y');
                 $review->formatted_created_at = $formattedDate;
@@ -138,17 +155,23 @@ class ReviewController extends Controller
     {
         try {
             $review = Review::findOrFail($id);
-
-            DB::beginTransaction();
-
-            // Xóa các ảnh liên quan
-            ImageReview::where('review_id', $review->id)->delete();
-
             $review->delete();
-
-            DB::commit();
-
             return response()->json(['message' => 'Review deleted successfully'], 200);
+        } catch (Exception $e) {
+            DB::rollBack();
+            return response()->json(['error' => 'Failed to delete review', 'message' => $e->getMessage()], 500);
+        }
+    }
+    public function destroyFromUser(Request $request, $id)
+    {
+        try {
+            $userId = $request->user()->id;
+            $review = Review::findOrFail($id);
+            if($userId == $review->user_id){
+                $review->delete();
+                return response()->json(['message' => 'Review deleted successfully'], 200);
+            }
+            return response()->json(['error' => 'Failed to delete review'], 500);
         } catch (Exception $e) {
             DB::rollBack();
             return response()->json(['error' => 'Failed to delete review', 'message' => $e->getMessage()], 500);

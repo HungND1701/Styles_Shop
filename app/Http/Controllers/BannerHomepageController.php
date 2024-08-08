@@ -7,6 +7,8 @@ use App\Http\Controllers\Controller;
 use App\Models\BannerHomepage;
 use Illuminate\Http\Response;
 use Exception;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
 
 class BannerHomepageController extends Controller
 {
@@ -58,12 +60,12 @@ class BannerHomepageController extends Controller
     public function update(Request $request, $id)
     {
         try {
+            Log::info($request);
             $validatedData = $request->validate([
                 'stt' => 'required|integer',
                 'url' => 'required|string|max:255',
-                'is_active' => 'required|boolean'
+                'is_active' => 'nullable|boolean'
             ]);
-
             $banner = BannerHomepage::findOrFail($id);
             $banner->update($validatedData);
             return response()->json($banner, Response::HTTP_OK);
